@@ -1,0 +1,8 @@
+GroundingDINO/
+DataFiles_Decrypt_20250520170635/
+Output/
+Test_data/
+logs/
+model_and_index/*
+search_api_bak.py
+groundingdino/groundingdino_swint_ogc.pth

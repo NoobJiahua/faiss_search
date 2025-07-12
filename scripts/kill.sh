@@ -1,0 +1,1 @@
+lsof -i:8989|awk 'NR>1{print $2}'|xargs kill -9
