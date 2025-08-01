@@ -316,22 +316,107 @@ async def run_indexing_task(req: IndexingRequest):
         INDEXING_STATUS["start_time"] = None
         logger.info("后台索引任务执行完毕，状态已重置。")
 
+class NpyIndexingRequest(BaseModel):
+    npy_features_path: str
+    metadata_path: str
+    index_name: str
+    load_after: bool = True
 
-@app.post("/manage/start-indexing", summary="从URL列表启动后台索引构建任务")
-async def start_indexing_api(request: IndexingRequest, background_tasks: BackgroundTasks):
+async def run_npy_indexing_task(req: NpyIndexingRequest):
+    """
+    这个异步函数将在后台运行，它负责调用同步的 build_index_from_npy 方法。
+    """
+    global INDEXING_STATUS, retrieval_system_instance
+    
+    logger.info(f"后台 NPY 索引任务启动: index_name='{req.index_name}', features='{req.npy_features_path}'")
+    INDEXING_STATUS.update({
+        "is_running": True,
+        "start_time": datetime.now().isoformat(),
+        "message": f"正在从 .npy 文件 '{os.path.basename(req.npy_features_path)}' 构建索引 '{req.index_name}'..."
+    })
+
+    try:
+        if not retrieval_system_instance:
+            raise RuntimeError("FAISS 检索系统实例未初始化。")
+
+        await asyncio.to_thread(
+            retrieval_system_instance.build_index_from_npy,
+            npy_features_path=req.npy_features_path,
+            metadata_path=req.metadata_path,
+            index_base_name=req.index_name,
+            index_dir=INDEX_DIR
+        )
+        
+        
+        success_message = f"索引 '{req.index_name}' (来自 {req.npy_features_path}) 构建成功完成！"
+        INDEXING_STATUS["message"] = success_message
+        logger.info(f"后台 NPY 索引任务 '{req.index_name}' 成功完成。")
+        
+        if req.load_after:
+            logger.info(f"根据请求，将自动加载新构建的索引: '{req.index_name}'")
+            async with api_lock:
+                logger.info("获取到锁，开始重载索引...")
+                load_success = await asyncio.to_thread(
+                    retrieval_system_instance.load_index,
+                    req.index_name, 
+                    INDEX_DIR
+                )
+                if load_success:
+                    INDEXING_STATUS["message"] += f" 并已成功加载到内存。"
+                    logger.info(f"新索引 '{req.index_name}' 已成功加载。")
+                else:
+                    INDEXING_STATUS["message"] += f" 但自动加载失败，请手动加载。"
+                    logger.error(f"自动加载新索引 '{req.index_name}' 失败。")
+            logger.info("索引重载操作完成，已释放锁。")
+            
+    except Exception as e:
+        error_message = f"后台 numpy 索引任务失败: {e}"
+        INDEXING_STATUS["message"] = error_message
+        logger.error(error_message, exc_info=True)
+    finally:
+        INDEXING_STATUS.update({"is_running": False, "start_time": None})
+        logger.info("后台 numpy 索引任务执行完毕，状态已重置。")
+
+
+@app.post("/manage/start-indexing", summary="从 .npy 文件启动后台索引构建任务")
+async def start_npy_indexing_api(request: NpyIndexingRequest, background_tasks: BackgroundTasks):
+    """
+    接收 .npy 特征文件和 .pkl 元数据文件的路径，启动一个后台任务来构建索引。
+    此接口会立即返回，不会等待构建完成。
+    """
     global INDEXING_STATUS
     if INDEXING_STATUS["is_running"]:
-        raise HTTPException(status_code=409, detail=f"索引任务已在运行中: {INDEXING_STATUS['message']}")
+        raise HTTPException(status_code=409, detail=f"已有索引任务在运行中: {INDEXING_STATUS['message']}")
     
-    if not os.path.exists(request.url_list_txt):
-        raise HTTPException(status_code=404, detail=f"URL列表文件未找到: {request.url_list_txt}")
+    # 检查输入文件在服务器上是否存在
+    if not os.path.exists(request.npy_features_path):
+        raise HTTPException(status_code=404, detail=f"特征文件 .npy 未找到: {request.npy_features_path}")
+    if not os.path.exists(request.metadata_path):
+        raise HTTPException(status_code=404, detail=f"元数据文件 .pkl 未找到: {request.metadata_path}")
 
-    background_tasks.add_task(run_indexing_task, request)
+    # 将我们的异步包装函数添加到后台任务中
+    background_tasks.add_task(run_npy_indexing_task, request)
     
     return JSONResponse(
-        status_code=202, 
-        content={"message": "索引构建任务已成功启动，正在后台运行。请通过 /manage/indexing-status 接口查询进度。"}
+        status_code=202, # 202 Accepted
+        content={"message": "从 .npy 文件构建索引的任务已成功启动，正在后台运行。"}
     )
+
+# @app.post("/manage/start-indexing", summary="从URL列表启动后台索引构建任务")
+# async def start_indexing_api(request: IndexingRequest, background_tasks: BackgroundTasks):
+#     global INDEXING_STATUS
+#     if INDEXING_STATUS["is_running"]:
+#         raise HTTPException(status_code=409, detail=f"索引任务已在运行中: {INDEXING_STATUS['message']}")
+    
+#     if not os.path.exists(request.url_list_txt):
+#         raise HTTPException(status_code=404, detail=f"URL列表文件未找到: {request.url_list_txt}")
+
+#     background_tasks.add_task(run_indexing_task, request)
+    
+#     return JSONResponse(
+#         status_code=202, 
+#         content={"message": "索引构建任务已成功启动，正在后台运行。请通过 /manage/indexing-status 接口查询进度。"}
+#     )
 
 @app.get("/manage/indexing-status", summary="查询后台索引构建任务的状态")
 async def get_indexing_status_api():
