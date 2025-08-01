@@ -199,106 +199,69 @@ class ImageRetrieval:
         return self
     
     
-    def build_index_from_urls(self, url_list_txt: str, index_base_name: str, index_dir: str, 
-                              batch_size: int = 64, download_concurrency: int = 100):
+    def build_index_from_npy(self, npy_features_path: str, metadata_path: str, 
+                             index_base_name: str, index_dir: str):
         """
-        通过异步下载URL列表中的图片并批量提取特征来构建FAISS索引。
-        
+        从一个 .npy 特征文件和一个 .pkl 元数据文件构建 FAISS 索引。
+
         Args:
-            url_list_txt (str): 包含图片URL列表的文本文件路径，每行一个URL。
-            index_base_name (str): 索引文件的基础名称。
-            index_dir (str): 存储索引文件的目录。
-            batch_size (int): 特征提取时使用的批处理大小。
-            download_concurrency (int): 并发下载的协程数量。
+            npy_features_path (str): 包含特征向量的 .npy 文件的路径。
+            metadata_path (str): 包含元数据 (如 image_paths) 的 .pkl 文件的路径。
+            index_base_name (str): 要保存的新索引文件的基础名称。
+            index_dir (str): 保存新索引文件的目录。
         """
-        # 1. 从 .txt 文件读取所有 URL
+        logging.info(f"开始从 .npy 文件构建索引: '{index_base_name}'")
+
+        if not os.path.exists(npy_features_path):
+            logging.error(f"特征文件未找到: {npy_features_path}")
+            return self
+        if not os.path.exists(metadata_path):
+            logging.error(f"元数据文件未找到: {metadata_path}")
+            return self
+
         try:
-            with open(url_list_txt, 'r') as f:
-                urls = [line.strip() for line in f if line.strip()]
-            if not urls:
-                logging.warning(f"URL 列表文件 '{url_list_txt}' 为空或未包含有效URL。")
-                return self
-            logging.info(msg=f"从 '{url_list_txt}' 读取到 {len(urls)} 个 URL。")
-        except FileNotFoundError:
-            logging.error(f"URL 列表文件未找到: {url_list_txt}")
-            return self
-
-        # 2. 运行异步下载和处理流程
-        async def main_async_pipeline():
-            # aiohttp.ClientSession 用于复用连接，提高效率
-            # TCPConnector 用于限制并发连接数，防止对服务器造成过大压力
-            connector = aiohttp.TCPConnector(limit=download_concurrency)
-            async with aiohttp.ClientSession(connector=connector) as session:
-                tasks = []
-                # 为每个 URL 创建一个下载任务
-                for url in urls:
-                    tasks.append(asyncio.create_task(self._download_and_decode_image(session, url)))
-                
-                # 使用 asyncio.gather 并发执行所有下载任务
-                # tqdm 用于显示下载进度
-                results = []
-                for f in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="异步下载图片中"):
-                    result = await f
-                    if result: # 只添加成功下载和解码的结果
-                        results.append(result)
-                return results
-
-        # 运行主异步流程
-        logging.info(f"启动异步下载流程，并发数: {download_concurrency}...")
-        # downloaded_results 是一个元组列表 [(url1, pil_image1), (url2, pil_image2), ...]
-        downloaded_results = asyncio.run(main_async_pipeline())
-
-        if not downloaded_results:
-            logging.error("未能成功下载和解码任何图片。无法构建索引。")
-            return self
+            logging.info(f"正在从 '{npy_features_path}' 加载特征向量...")
+            features_np = np.load(npy_features_path)
             
-        logging.info(f"成功下载并解码 {len(downloaded_results)} 张图片。")
+            logging.info(f"正在从 '{metadata_path}' 加载元数据...")
+            with open(metadata_path, 'rb') as f:
+                loaded_metadata = pickle.load(f)
 
-        # 3. 准备进行批量特征提取
-        # 将下载结果解包为两个列表：urls 和 pil_images
-        valid_urls, pil_images = zip(*downloaded_results)
-        
-        # 调用批量提取方法，这次源类型是 'pil'
-        features_list, final_valid_urls = self.extract_features_in_batches(
-            list(pil_images), source_type='pil', batch_size=batch_size
-        )
+            if 'image_paths' not in loaded_metadata:
+                logging.error("元数据文件中缺少 'image_paths' 键。")
+                return self
+            
+            num_features = features_np.shape[0]
+            num_paths = len(loaded_metadata['image_paths'])
+            
+            if num_features != num_paths:
+                logging.error(f"数据不匹配：特征数量 ({num_features}) 与元数据路径数量 ({num_paths}) 不一致。")
+                return self
+            
+            logging.info(f"数据校验通过：找到 {num_features} 个特征和路径。")
+            
+            if features_np.dtype != np.float32:
+                logging.warning(f"特征数据类型为 {features_np.dtype}，将转换为 float32。")
+                features_np = features_np.astype('float32')
 
-        # 4. 构建 FAISS 索引 (与 build_index 方法的后半部分相同)
-        if not features_list:
-            logging.error("未能从下载的图片中提取任何特征。")
-            return self
+            self.dimension = features_np.shape[1]
+            logging.info(f"使用维度 {self.dimension} 构建 FAISS HNSW 索引...")
+            
+            self.index = faiss.index_factory(self.dimension, 'HNSW64', faiss.METRIC_L2)
+            self.index.add(features_np)
+            
+            self.metadata = loaded_metadata
+            
+            logging.info(f"索引构建完成。共索引向量数量: {self.index.ntotal}")
 
-        features_np = np.array(features_list).astype('float32')
-        self.dimension = features_np.shape[1]
-        logging.info(f"使用维度 {self.dimension} 构建FAISS索引...")
-        self.index = faiss.index_factory(self.dimension, 'HNSW64', faiss.METRIC_L2)
-        self.index.add(features_np)
-        
-        # --- 重要：元数据现在存储的是 URL ---
-        self.metadata = {'image_paths': list(final_valid_urls)}
-        
-        logging.info(f"索引构建完成。共索引图片数量: {self.index.ntotal}")
-        self.save_index(index_base_name, index_dir)
-        return self
-
-    async def _download_and_decode_image(self, session: aiohttp.ClientSession, url: str):
-        """
-        一个异步的辅助函数，用于下载单个图片并将其解码为 PIL.Image 对象。
-        """
-        try:
-            async with session.get(url, timeout=30) as response:
-                response.raise_for_status() 
-                image_bytes = await response.read()
-                # 在内存中从字节流解码图像
-                pil_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-                return url, pil_image
-        except asyncio.TimeoutError:
-            logging.warning(f"下载超时: {url}")
-        except aiohttp.ClientError as e:
-            logging.warning(f"下载时发生客户端错误: {url}, 错误: {e}")
+            self.save_index(index_base_name, index_dir)
+            
         except Exception as e:
-            logging.warning(f"处理图片URL时发生未知错误: {url}, 错误: {e}")
-        return None
+            logging.error(f"从 .npy 文件构建索引时发生错误: {e}", exc_info=True)
+            self.index = None
+            self.metadata = None
+
+        return self
 
     
     def get_index_paths(self, index_base_name: str, index_dir: str):

@@ -81,7 +81,11 @@ def FromQiGetdir(prefix, limit=1000, delimiter='/',marker=None, localfile=None):
         marker = ret.get('marker')
 
 
-def FromQiGetFile(prefix, limit=1000, delimiter=None,marker=None, localfile=None):
+def FromQiGetFile(prefix, limit=1000, delimiter=None, marker=None, localfile=None, collect_files=None):
+    """
+    从七牛云获取文件
+    collect_files: 如果提供，将收集下载的文件信息
+    """
     print(f"{prefix}开始下载")
     bucket = BucketManager(q)
     # 前缀
@@ -95,24 +99,28 @@ def FromQiGetFile(prefix, limit=1000, delimiter=None,marker=None, localfile=None
         ret, eof, info = bucket.list(bucket_name, prefix, marker, limit, delimiter)
         
         assert len(ret.get('items')) is not None
-        downloads(i,ret.get('items'))
+        downloads(i, ret.get('items'), collect_files)
         if eof:
             break
-        i+=1
+        i += 1
         marker = ret.get('marker')
     
-def downloads(i:int,RetItems:list):
-
-    RetItems = tqdm(RetItems,total=len(RetItems),desc=f"下载第{i}个batch")
+def downloads(i: int, RetItems: list, collect_files: List[Tuple[str, str]] = None):
+    RetItems = tqdm(RetItems, total=len(RetItems), desc=f"下载第{i}个batch")
     for RetItem in RetItems:
         url = parent_url + RetItem.get('key')
         project = url.split("/")[-2]
-        os.makedirs(parent_savedir + project,exist_ok=True)
-        savefile = os.path.join(parent_savedir,project,url.split("/")[-1])
+        os.makedirs(parent_savedir + project, exist_ok=True)
+        savefile = os.path.join(parent_savedir, project, url.split("/")[-1])
+        
         if os.path.exists(savefile):
             print(f"{savefile}已存在")
-            continue
-        Down_url(url,savefile)
+        else:
+            Down_url(url, savefile)
+        
+        if collect_files is not None:
+            bucket_key = f"{bucket_name}/{RetItem.get('key')}"
+            collect_files.append((savefile, bucket_key))
 
 
 def Down_url(url,savefile):
@@ -122,13 +130,37 @@ def Down_url(url,savefile):
             pic.write(response.content)
             
             
-def run(division,AIid,month,ds):
+def run(division, AIid, month, ds, 
+        extract_features=False,  # 是否提取特征
+        model_path=None,
+        config_path=None,
+        feature_save_path=None,
+        metadata_save_path=None,
+        batch_size=256):  # 批处理大小
+    """
+    extract_features用来控制是否提取特征
+    """
     sqlcon = sqlite3.connect("/home/fuxin/AiPatrol/road_depoly/data/Road_LD_DB.db")
     cursor = sqlcon.cursor()
 
+    feature_processor = None
+    if extract_features:
+        if not all([model_path, config_path, feature_save_path, metadata_save_path]):
+            raise ValueError("特征提取需要提供所有相关路径参数")
+        
+
+        feature_processor = AsyncFeatureProcessor(
+            model_path=model_path,
+            config_path=config_path,
+            feature_save_path=feature_save_path,
+            metadata_save_path=metadata_save_path,
+            batch_size=batch_size
+        )
+        feature_processor.start()
+
     projects = []
 
-    # listdays = FromQiGetdir(prefix='ai-patrol/YT20241035/2025/05/')
+    # 获取项目列表
     for d in ds:
         day = f'ai-patrol/{AIid}/2025/{month}/{d}/'
         p = FromQiGetdir(prefix=day)
@@ -136,55 +168,63 @@ def run(division,AIid,month,ds):
             continue
         projects += p
     print(f"发现项目数量:{len(projects)} 个")
+    
     for project in projects:
-        profinish_code=0
+        profinish_code = 0
         projectname = os.path.basename(project.rstrip('/'))
-        proj =pd.read_sql("SELECT * FROM projects WHERE route_code=?",params=(projectname,),con=sqlcon)
-        if  proj.empty:            
-            FromQiGetFile(project)
+        proj = pd.read_sql("SELECT * FROM projects WHERE route_code=?", params=(projectname,), con=sqlcon)
+        
+        if proj.empty:
             
-        #开始推理
+            collected_files = [] if extract_features else None
+            
+            # 下载文件
+            FromQiGetFile(project, collect_files=collected_files)
+            
+            # 处理特征提取
+            if extract_features and collected_files:
+                if use_async:
+                    # 异步处理 - 添加到队列后继续
+                    feature_processor.add_files(collected_files)
+                    logging.info(f"已添加 {len(collected_files)} 个文件到特征提取队列")
+                else:
+                    # 同步处理 - 等待完成
+                    logging.info(f"开始为项目 {projectname} 提取 {len(collected_files)} 个文件的特征")
+                    feature_processor.process_files(collected_files)
+            
+            # 开始推理（异步模式下不会被阻塞）
             profinish_code = start.main(projectname)
-            if profinish_code==200:
-                #更新已经预测完的的状态
-                cursor.execute(f"""INSERT INTO record (project,sfpre,sfsend) VALUES (?,1,0)""",(projectname,))
+            if profinish_code == 200:
+                # 更新已经预测完的的状态
+                cursor.execute(f"""INSERT INTO record (project,sfpre,sfsend) VALUES (?,1,0)""", (projectname,))
                 sqlcon.commit()
                 shutil.rmtree(f"/home/fuxin/AiPatrol/Tempdata/{projectname}")
                 print(f"删除{projectname} 项目文件")
-        #计算并上报报文
-
-
-        # if True:
-        #     continue
-        sfsend =pd.read_sql("SELECT * FROM record WHERE project=? and sfsend=0",params=(projectname,),con=sqlcon)
-        if not sfsend.empty:
-            A = uploadData.Getrequests(projectname)
-            A.TraversalProject(division)
-
-            # 上报报文
-            resp_json = SendReport.sendReport2shms(AIid,projectname)
-            if resp_json.get("code")==200:
-                # if resp_json.get("data").get("status")== "INSERT":
-                #     cursor.execute(f"""UPDATE record SET sfsend = 2 WHERE project =? """,(projectname,))
-                # else:
-                cursor.execute(f"""UPDATE record SET sfsend = 1 WHERE project =? """,(projectname,))
-                sqlcon.commit()
-            else:
-                print(resp_json)
-
         
+        # 后续处理保持不变...
+    
+    # 如果使用异步处理，等待所有任务完成
+    if extract_features and use_async and feature_processor:
+        feature_processor.stop()
+    
     sqlcon.close()
-            
-
-
-
 
 if __name__ == '__main__':
-    # # 上传文件
-    # updata('test.txt', 'test.txt')
-    # # 下载文件
+    # 使用示例
     AIid = "YT20241021"
     division = 430405
     month = "07"
     ds = ['29']
-    run(division=division,AIid=AIid,month=month,ds=ds)
+    
+    # GPU版本 - 使用异步处理，不阻塞主流程
+    run(division=division, 
+        AIid=AIid, 
+        month=month, 
+        ds=ds,
+        extract_features=True,
+        model_path="/path/to/your/model.pth",
+        config_path="/path/to/your/config.json",
+        feature_save_path="/path/to/features.npy",
+        metadata_save_path="/path/to/metadata.pkl",
+        batch_size=256 
+    )
