@@ -1,3 +1,4 @@
+import asyncio
 import os
 import logging
 import io
@@ -20,7 +21,7 @@ MODEL_PATH = os.getenv('MODEL_PATH', "/home/pjh/faiss_search/model_and_index/mob
 CONFIG_PATH = os.getenv('CONFIG_PATH', "/home/pjh/faiss_search/model_and_index/config.json")
 DATA_ROOT = os.getenv('DATA_ROOT', "/home/pjh/faiss_search/Output")
 INDEX_DIR = os.getenv('INDEX_DIR', "/home/pjh/faiss_search/model_and_index")
-INDEX_NAME = os.getenv('INDEX_NAME', "Crop_Decrypt_index")
+INDEX_NAME = os.getenv('INDEX_NAME', None)
 
 
 DINO_CONFIG_PATH = os.getenv('DINO_CONFIG_PATH', "/home/pjh/faiss_search/groundingdino/config/GroundingDINO_SwinT_OGC.py")
@@ -36,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 retrieval_system_instance = None
 dino_processor_instance = None
-
+api_lock = asyncio.Lock()
 app = FastAPI()
 
 def initialize_faiss_retrieval_system():
@@ -50,20 +51,16 @@ def initialize_faiss_retrieval_system():
             
             retrieval_system_instance = ImageRetrieval(MODEL_PATH, CONFIG_PATH, device=DEVICE)
             if not retrieval_system_instance.load_index(INDEX_NAME, INDEX_DIR):
-                logger.info(f"未能加载 FAISS 索引 '{INDEX_NAME}'。尝试构建...")
-                if os.path.exists(DATA_ROOT) and any(os.scandir(DATA_ROOT)): # 检查目录是否为空
-                    retrieval_system_instance.build_index(DATA_ROOT, INDEX_NAME, INDEX_DIR)
-                    logger.info(f"FAISS 索引 '{INDEX_NAME}' 构建成功。")
-                else:
-                    logger.warning(f"数据源目录 {DATA_ROOT} 为空或未找到。FAISS 索引将为空。")
+                logger.warning(f"未能加载默认索引 '{INDEX_NAME}'。API 将在无可用索引的状态下启动。请稍后通过 '/manage/start-indexing' 构建新索引，或通过 '/manage/reload-index' 加载一个现有索引。")
             else:
-                logger.info(f"FAISS 索引 '{INDEX_NAME}' 加载成功。")
+                logger.info(f"默认索引 '{INDEX_NAME}' 加载成功。")
             return True
         except Exception as e:
-            logger.error(f"初始化 FAISS ImageRetrieval 系统时发生错误: {e}", exc_info=True)
+            logger.error(f"初始化 FAISS ImageRetrieval 系统时发生严重错误: {e}", exc_info=True)
             retrieval_system_instance = None
             return False
     return True
+
 
 def initialize_dino_processor():
     global dino_processor_instance
@@ -102,7 +99,7 @@ async def startup_event():
         
 
 
-async def _perform_search_for_image(image_bytes: bytes, target_directory: str, dino_text_prompt: str, similarity_threshold: float, top_k: int):
+async def _perform_search_for_image(image_bytes: bytes, dino_text_prompt: str, similarity_threshold: float, top_k: int):
     
     try:
         nparr = np.frombuffer(image_bytes, np.uint8)
@@ -145,9 +142,8 @@ async def _perform_search_for_image(image_bytes: bytes, target_directory: str, d
         roi_idx_for_log = i + 1
         logger.info(f"API 调用：正在为 ROI #{roi_idx_for_log} 进行 FAISS 搜索...")
         try:
-            search_output_for_roi = retrieval_system_instance.search_similar_images_in_directory(
+            search_output_for_roi = retrieval_system_instance.search_globally(
                 query_image_input=roi_pil_img,
-                target_directory=target_directory,
                 k=top_k,
                 similarity_threshold=similarity_threshold
             )
@@ -176,7 +172,7 @@ async def _perform_search_for_image(image_bytes: bytes, target_directory: str, d
     if not aggregated_results_dict:
         return {
             "status": "success",
-            "message": f"处理了 {len(list_of_roi_pil_images)} 个ROI，但在目标目录 '{target_directory}' 中未能找到满足相似度阈值 {similarity_threshold:.2f} 的图片。",
+            "message": f"处理了 {len(list_of_roi_pil_images)} 个ROI，但未能找到满足相似度阈值 {similarity_threshold:.2f} 的图片。",
             "rois_extracted_count": len(list_of_roi_pil_images),
             "extracted_rois_base64": encoded_rois,
             "search_results": []
@@ -195,10 +191,9 @@ async def _perform_search_for_image(image_bytes: bytes, target_directory: str, d
 
 
 
-@app.post("/search/", summary="对单个图像进行相似性搜索")
+@app.post("/search", summary="对单个图像进行相似性搜索")
 async def search_images_api(
     query_image: UploadFile = File(..., description="要查询的图像文件。"),
-    target_directory: str = Form(..., description="要在其中搜索的目标目录的绝对路径。"),
     dino_text_prompt: str = Form(DEFAULT_DINO_TEXT_PROMPT, description="用于 GroundingDINO ROI 检测的文本提示。"),
     similarity_threshold: float = Form(0.65, ge=0.1, le=1.0),
     top_k: int = Form(10, ge=1, le=50)
@@ -212,8 +207,10 @@ async def search_images_api(
         logger.error("API 调用：未提供图像文件或文件为空。")
         raise HTTPException(status_code=400, detail="查询图像文件为空或未提供。")
     
-    
-    result = await _perform_search_for_image(image_bytes, target_directory, dino_text_prompt, similarity_threshold, top_k)
+    async with api_lock:
+        if retrieval_system_instance is None:
+            raise HTTPException(status_code=503, detail="索引服务尚未初始化，无法重载索引。")
+        result = await _perform_search_for_image(image_bytes=image_bytes, dino_text_prompt=dino_text_prompt, similarity_threshold=similarity_threshold, top_k=top_k)
     
     # 根据统一的返回结构进行判断
     if result.get("status") == "error":
@@ -227,7 +224,6 @@ async def search_images_api(
 @app.post("/batch-search", summary="对批量上传的图像进行相似性搜索")
 async def search_images_batch_api(
     query_images: List[UploadFile] = File(..., description="要批量查询的图像文件列表。"),
-    target_directory: str = Form(...),
     dino_text_prompt: str = Form(DEFAULT_DINO_TEXT_PROMPT),
     similarity_threshold: float = Form(0.65, ge=0.1, le=1.0),
     top_k: int = Form(10, ge=1, le=50)
@@ -236,45 +232,47 @@ async def search_images_batch_api(
         raise HTTPException(status_code=400, detail="未提供任何查询图像文件。")
         
     batch_results = []
-    for image_file in query_images:
-        logger.info(f"正在处理批量任务中的文件: {image_file.filename}")
-        image_bytes = await image_file.read()
-        
-        response_payload = {}
-        if not image_bytes:
-            response_payload = {"status": "error", "message": "图像文件为空。"}
-        else:
-            result = await _perform_search_for_image(image_bytes, target_directory, dino_text_prompt, similarity_threshold, top_k)
-            if result.get("status") == "error":
-                response_payload = {"status": "error", "message": result.get("message")}
+    async with api_lock:
+        if retrieval_system_instance is None:
+            raise HTTPException(status_code=503, detail="索引服务尚未初始化，无法重载索引。")
+        for image_file in query_images:
+            logger.info(f"正在处理批量任务中的文件: {image_file.filename}")
+            image_bytes = await image_file.read()
+            
+            response_payload = {}
+            if not image_bytes:
+                response_payload = {"status": "error", "message": "图像文件为空。"}
             else:
-                response_payload = {"status": "success", **result}
-        
-        response_payload["filename"] = image_file.filename
-        batch_results.append(response_payload)
+                result = await _perform_search_for_image(image_bytes=image_bytes, dino_text_prompt=dino_text_prompt, similarity_threshold=similarity_threshold, top_k=top_k)
+                if result.get("status") == "error":
+                    response_payload = {"status": "error", "message": result.get("message")}
+                else:
+                    response_payload = result
+            
+            response_payload["filename"] = image_file.filename
+            batch_results.append(response_payload)
         
     return JSONResponse(status_code=200, content={"batch_results": batch_results})
 
 
-# 用于防止重复启动索引任务的状态变量
 INDEXING_STATUS = {
     "is_running": False,
     "start_time": None,
     "message": "未开始"
 }
 
-# 用于接收启动索引任务请求的 Pydantic 模型
 class IndexingRequest(BaseModel):
     url_list_txt: str
     index_name: str
     batch_size: int = 64
     download_concurrency: int = 100
+    load_after: bool = True
 
-def run_indexing_task(req: IndexingRequest):
+async def run_indexing_task(req: IndexingRequest):
     """
     后台线程中运行，调用索引构建
     """
-    global INDEXING_STATUS
+    global INDEXING_STATUS, retrieval_system_instance
     
     logger.info(f"后台索引任务启动: index_name='{req.index_name}', source='{req.url_list_txt}'")
     INDEXING_STATUS["is_running"] = True
@@ -283,7 +281,7 @@ def run_indexing_task(req: IndexingRequest):
 
     try:
         if retrieval_system_instance:
-            retrieval_system_instance.build_index_from_urls(
+            await retrieval_system_instance.build_index_from_urls(
                 url_list_txt=req.url_list_txt,
                 index_base_name=req.index_name,
                 index_dir=INDEX_DIR,
@@ -292,6 +290,20 @@ def run_indexing_task(req: IndexingRequest):
             )
             INDEXING_STATUS["message"] = f"索引 '{req.index_name}' 构建成功完成！"
             logger.info(f"后台索引任务 '{req.index_name}' 成功完成。")
+            
+            if req.load_after:
+                logger.info(f"根据请求，将自动加载新构建的索引: '{req.index_name}'")
+                
+                async with api_lock:
+                    logger.info("获取到锁，开始重载索引...")
+                    load_success = retrieval_system_instance.load_index(req.index_name, INDEX_DIR)
+                    if load_success:
+                        INDEXING_STATUS["message"] += f" 并已成功加载到内存。"
+                        logger.info(f"新索引 '{req.index_name}' 已成功加载。")
+                    else:
+                        INDEXING_STATUS["message"] += f" 但自动加载失败，请手动加载。"
+                        logger.error(f"自动加载新索引 '{req.index_name}' 失败。")
+            logger.info("索引重载操作完成，已释放锁。")
         else:
             raise RuntimeError("FAISS 检索系统实例未初始化。")
             
@@ -311,14 +323,11 @@ async def start_indexing_api(request: IndexingRequest, background_tasks: Backgro
     if INDEXING_STATUS["is_running"]:
         raise HTTPException(status_code=409, detail=f"索引任务已在运行中: {INDEXING_STATUS['message']}")
     
-    # 检查URL列表文件是否存在
     if not os.path.exists(request.url_list_txt):
         raise HTTPException(status_code=404, detail=f"URL列表文件未找到: {request.url_list_txt}")
 
-    # 将耗时的任务添加到后台
     background_tasks.add_task(run_indexing_task, request)
     
-    # 立即返回，不等待任务完成
     return JSONResponse(
         status_code=202, 
         content={"message": "索引构建任务已成功启动，正在后台运行。请通过 /manage/indexing-status 接口查询进度。"}
@@ -328,4 +337,34 @@ async def start_indexing_api(request: IndexingRequest, background_tasks: Backgro
 async def get_indexing_status_api():
     return JSONResponse(status_code=200, content=INDEXING_STATUS)
 
+
+class ReloadIndexRequest(BaseModel):
+    index_name: str
+    
+@app.post("/manage/reload-index", summary="重新加载指定的FAISS索引")
+async def reload_index_api(request: ReloadIndexRequest):
+    """
+    加载一个新的FAISS索引。
+    """
+    global retrieval_system_instance
+    if retrieval_system_instance is None:
+        raise HTTPException(status_code=503, detail="索引服务尚未初始化，无法重载索引。")
+
+    logger.info(f"收到重载索引请求: '{request.index_name}'")
+    
+    async with api_lock:
+        logger.info("获取到锁，开始重载索引...")
+        try:
+            success = retrieval_system_instance.load_index(request.index_name, INDEX_DIR)
+            if success:
+                message = f"索引 '{request.index_name}' 已成功加载并生效。"
+                logger.info(message)
+                return JSONResponse(status_code=200, content={"message": message})
+            else:
+                message = f"加载索引 '{request.index_name}' 失败。请检查索引文件是否存在或已损坏。"
+                logger.error(message)
+                raise HTTPException(status_code=404, detail=message)
+        except Exception as e:
+            logger.error(f"重载索引时发生未知错误: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"重载索引时发生内部错误: {e}")
 

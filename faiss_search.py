@@ -177,7 +177,7 @@ class ImageRetrieval:
         logging.info(f"找到 {len(image_paths)} 张图片。开始使用批大小 {batch_size} 进行特征提取。")
 
         
-        features_list, valid_image_paths = self.extract_features_in_batches(image_paths, batch_size)
+        features_list, valid_image_paths = self.extract_features_in_batches(image_paths, batch_size=batch_size, source_type='path')
 
         if not features_list:
             logging.error("未能提取任何特征。无法构建索引。")
@@ -509,6 +509,58 @@ class ImageRetrieval:
                    f"(相似度 >= {similarity_threshold:.2f})。")
         logging.info(message)
         return {"status": "success", "message": message, "results": final_results}
+    
+    def search_globally(self, query_image_input, k: int = 10, similarity_threshold: float = 0.8):
+        """
+        在整个索引中执行全局相似性搜索，返回包含 rank 的结构化结果。
+        """
+        if self.index is None or self.metadata is None or 'image_paths' not in self.metadata:
+            return {"status": "error", "message": "索引未加载、元数据不完整或未构建。", "results": []}
+        if self.index.ntotal == 0:
+            return {"status": "warning", "message": "索引为空，无法执行搜索。", "results": []}
+
+        try:
+            query_feature = self.extract_feature(query_image_input)
+        except Exception as e:
+            return {"status": "error", "message": f"提取查询图像特征失败: {e}", "results": []}
+            
+        query_feature_np = query_feature.reshape(1, -1).astype('float32')
+        
+        num_to_search = min(self.index.ntotal, k * 5 if k > 0 else 50) 
+        distances_sq, indices = self.index.search(query_feature_np, num_to_search)
+        
+        candidate_results = []
+        if not indices.size or indices[0][0] == -1:
+            return {"status": "success", "message": "在索引中没有找到相似的图片。", "results": []}
+
+        for i in range(len(indices[0])):
+            idx = indices[0][i]
+            if idx == -1: continue
+
+            if not (0 <= idx < len(self.metadata['image_paths'])):
+                continue
+
+            dist_sq = distances_sq[0][i]
+            similarity = float(1 - (dist_sq / 2))
+            
+            if similarity >= similarity_threshold:
+                candidate_results.append({
+                    'similarity': max(0.0, min(1.0, similarity)),
+                    'image_path': self.metadata['image_paths'][idx]
+                })
+        
+        candidate_results.sort(key=lambda x: x['similarity'], reverse=True)
+
+        final_results = candidate_results[:k]
+
+        for rank, item in enumerate(final_results):
+            item['rank'] = rank + 1
+            
+        return {
+            "status": "success",
+            "message": f"全局搜索完成，找到 {len(final_results)} 个符合条件的结果。",
+            "results": final_results
+        }
     
 
 if __name__ == "__main__":
