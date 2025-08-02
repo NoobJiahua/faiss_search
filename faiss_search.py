@@ -141,6 +141,8 @@ class ImageRetrieval:
             features_np_batch = normalized_tensor_batch.cpu().numpy()
             all_features.extend(features_np_batch)
             valid_sources_in_order.extend(current_batch_valid_sources)
+            feature_np = np.array(all_features).astype('float32')
+            np.save('/home/pjh/faiss_search/model_and_index/saved.npy', feature_np)
             
         return all_features, valid_sources_in_order
     
@@ -254,7 +256,7 @@ class ImageRetrieval:
             
             logging.info(f"索引构建完成。共索引向量数量: {self.index.ntotal}")
 
-            self.save_index(index_base_name, index_dir)
+            self.save_index(index_base_name, index_dir, save_metadata=False)
             
         except Exception as e:
             logging.error(f"从 .npy 文件构建索引时发生错误: {e}", exc_info=True)
@@ -269,7 +271,7 @@ class ImageRetrieval:
         metadata_path = os.path.join(index_dir, f"{index_base_name}.pkl")
         return faiss_index_path, metadata_path
 
-    def save_index(self, index_base_name: str, index_dir: str):
+    def save_index(self, index_base_name: str, index_dir: str, save_metadata=True):
         if self.index is None or self.metadata is None:
             logging.warning("索引或元数据未构建。无需保存。")
             return
@@ -281,8 +283,9 @@ class ImageRetrieval:
             logging.info(f"保存FAISS索引到 {faiss_index_path}")
             faiss.write_index(self.index, faiss_index_path)
             logging.info(f"保存元数据到 {metadata_path}")
-            with open(metadata_path, 'wb') as f:
-                pickle.dump(self.metadata, f)
+            if save_metadata:
+                with open(metadata_path, 'wb') as f:
+                    pickle.dump(self.metadata, f)
         except Exception as e:
             logging.error(f"保存索引/元数据时出错: {e}")
 
