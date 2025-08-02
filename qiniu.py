@@ -211,12 +211,11 @@ def run(division, AIid, month, ds,
 
 if __name__ == '__main__':
     # 使用示例
-    AIid = "YT20241021"
-    division = 430405
-    month = "07"
-    ds = ['29']
+    AIid = "YT20241012"
+    division = 000000
+    month = "03"
+    ds = ['02']
     
-    # GPU版本 - 使用异步处理，不阻塞主流程
     run(division=division, 
         AIid=AIid, 
         month=month, 
