@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 class FeatureExtractor:
     """图像特征提取器"""
-    def __init__(self, model_path: str, config_path: str, device: str = None):
+    def __init__(self, model_path: str, config_path: str, device: str = 'cuda'):
         # 自动选择设备
         if device is None:
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

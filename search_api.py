@@ -17,15 +17,16 @@ import torch
 from faiss_search import ImageRetrieval
 from grounding_infer import GroundingDINOProcessor
 
-MODEL_PATH = os.getenv('MODEL_PATH', "/home/pjh/faiss_search/model_and_index/mobilenetv4.pth")
-CONFIG_PATH = os.getenv('CONFIG_PATH', "/home/pjh/faiss_search/model_and_index/config.json")
-DATA_ROOT = os.getenv('DATA_ROOT', "/home/pjh/faiss_search/Output")
-INDEX_DIR = os.getenv('INDEX_DIR', "/home/pjh/faiss_search/model_and_index")
+MODEL_PATH = os.getenv('MODEL_PATH', "/home/fuxin/faiss_search/model_and_index/mobilenetv4.pth")
+CONFIG_PATH = os.getenv('CONFIG_PATH', "/home/fuxin/faiss_search/model_and_index/config.json")
+DATA_ROOT = os.getenv('DATA_ROOT', "/home/fuxin/faiss_search/Output")
+# INDEX_DIR = os.getenv('INDEX_DIR', "/home/fuxin/faiss_search/model_and_index")  #修改为你的索引文件夹路径
+INDEX_DIR = os.getenv('INDEX_DIR', "/home/fuxin/AiPatrol/saved_npy_for_index")  #修改为你的索引文件夹路径
 INDEX_NAME = os.getenv('INDEX_NAME', None)
 
 
-DINO_CONFIG_PATH = os.getenv('DINO_CONFIG_PATH', "/home/pjh/faiss_search/groundingdino/config/GroundingDINO_SwinT_OGC.py")
-DINO_MODEL_PATH = os.getenv('DINO_MODEL_PATH', "/home/pjh/faiss_search/groundingdino/groundingdino_swint_ogc.pth")
+DINO_CONFIG_PATH = os.getenv('DINO_CONFIG_PATH', "/home/fuxin/faiss_search/groundingdino/config/GroundingDINO_SwinT_OGC.py")
+DINO_MODEL_PATH = os.getenv('DINO_MODEL_PATH', "/home/fuxin/faiss_search/groundingdino/groundingdino_swint_ogc.pth")
 DEFAULT_DINO_TEXT_PROMPT = os.getenv('DEFAULT_DINO_TEXT_PROMPT', "whole street view")
 
 DEVICE = os.getenv('DEVICE', "cuda" if torch.cuda.is_available() else "cpu")
@@ -268,53 +269,53 @@ class IndexingRequest(BaseModel):
     download_concurrency: int = 100
     load_after: bool = True
 
-async def run_indexing_task(req: IndexingRequest):
-    """
-    后台线程中运行，调用索引构建
-    """
-    global INDEXING_STATUS, retrieval_system_instance
+# async def run_indexing_task(req: IndexingRequest):
+#     """
+#     后台线程中运行，调用索引构建
+#     """
+#     global INDEXING_STATUS, retrieval_system_instance
     
-    logger.info(f"后台索引任务启动: index_name='{req.index_name}', source='{req.url_list_txt}'")
-    INDEXING_STATUS["is_running"] = True
-    INDEXING_STATUS["start_time"] = datetime.now().isoformat()
-    INDEXING_STATUS["message"] = f"正在从 {req.url_list_txt} 构建索引 '{req.index_name}'..."
+#     logger.info(f"后台索引任务启动: index_name='{req.index_name}', source='{req.url_list_txt}'")
+#     INDEXING_STATUS["is_running"] = True
+#     INDEXING_STATUS["start_time"] = datetime.now().isoformat()
+#     INDEXING_STATUS["message"] = f"正在从 {req.url_list_txt} 构建索引 '{req.index_name}'..."
 
-    try:
-        if retrieval_system_instance:
-            await retrieval_system_instance.build_index_from_urls(
-                url_list_txt=req.url_list_txt,
-                index_base_name=req.index_name,
-                index_dir=INDEX_DIR,
-                batch_size=req.batch_size,
-                download_concurrency=req.download_concurrency
-            )
-            INDEXING_STATUS["message"] = f"索引 '{req.index_name}' 构建成功完成！"
-            logger.info(f"后台索引任务 '{req.index_name}' 成功完成。")
+#     try:
+#         if retrieval_system_instance:
+#             await retrieval_system_instance.build_index_from_urls(
+#                 url_list_txt=req.url_list_txt,
+#                 index_base_name=req.index_name,
+#                 index_dir=INDEX_DIR,
+#                 batch_size=req.batch_size,
+#                 download_concurrency=req.download_concurrency
+#             )
+#             INDEXING_STATUS["message"] = f"索引 '{req.index_name}' 构建成功完成！"
+#             logger.info(f"后台索引任务 '{req.index_name}' 成功完成。")
             
-            if req.load_after:
-                logger.info(f"根据请求，将自动加载新构建的索引: '{req.index_name}'")
+#             if req.load_after:
+#                 logger.info(f"根据请求，将自动加载新构建的索引: '{req.index_name}'")
                 
-                async with api_lock:
-                    logger.info("获取到锁，开始重载索引...")
-                    load_success = retrieval_system_instance.load_index(req.index_name, INDEX_DIR)
-                    if load_success:
-                        INDEXING_STATUS["message"] += f" 并已成功加载到内存。"
-                        logger.info(f"新索引 '{req.index_name}' 已成功加载。")
-                    else:
-                        INDEXING_STATUS["message"] += f" 但自动加载失败，请手动加载。"
-                        logger.error(f"自动加载新索引 '{req.index_name}' 失败。")
-            logger.info("索引重载操作完成，已释放锁。")
-        else:
-            raise RuntimeError("FAISS 检索系统实例未初始化。")
+#                 async with api_lock:
+#                     logger.info("获取到锁，开始重载索引...")
+#                     load_success = retrieval_system_instance.load_index(req.index_name, INDEX_DIR)
+#                     if load_success:
+#                         INDEXING_STATUS["message"] += f" 并已成功加载到内存。"
+#                         logger.info(f"新索引 '{req.index_name}' 已成功加载。")
+#                     else:
+#                         INDEXING_STATUS["message"] += f" 但自动加载失败，请手动加载。"
+#                         logger.error(f"自动加载新索引 '{req.index_name}' 失败。")
+#             logger.info("索引重载操作完成，已释放锁。")
+#         else:
+#             raise RuntimeError("FAISS 检索系统实例未初始化。")
             
-    except Exception as e:
-        error_message = f"后台索引任务失败: {e}"
-        INDEXING_STATUS["message"] = error_message
-        logger.error(error_message, exc_info=True)
-    finally:
-        INDEXING_STATUS["is_running"] = False
-        INDEXING_STATUS["start_time"] = None
-        logger.info("后台索引任务执行完毕，状态已重置。")
+#     except Exception as e:
+#         error_message = f"后台索引任务失败: {e}"
+#         INDEXING_STATUS["message"] = error_message
+#         logger.error(error_message, exc_info=True)
+#     finally:
+#         INDEXING_STATUS["is_running"] = False
+#         INDEXING_STATUS["start_time"] = None
+#         logger.info("后台索引任务执行完毕，状态已重置。")
 
 class NpyIndexingRequest(BaseModel):
     npy_features_path: str

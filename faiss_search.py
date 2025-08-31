@@ -271,7 +271,7 @@ class ImageRetrieval:
         metadata_path = os.path.join(index_dir, f"{index_base_name}.pkl")
         return faiss_index_path, metadata_path
 
-    def save_index(self, index_base_name: str, index_dir: str, save_metadata=True):
+    def save_index(self, index_base_name: str, index_dir: str, save_metadata=False):
         if self.index is None or self.metadata is None:
             logging.warning("索引或元数据未构建。无需保存。")
             return
@@ -304,8 +304,8 @@ class ImageRetrieval:
                 self.metadata = pickle.load(f)
             self.dimension = self.index.d
             logging.info(f"索引 (包含 {self.index.ntotal} 个向量) 和元数据加载成功。")
-            if self.metadata and 'image_paths' in self.metadata:
-                self.metadata['image_paths'] = [os.path.abspath(os.path.normpath(p)) for p in self.metadata['image_paths']]
+            # if self.metadata and 'image_paths' in self.metadata:
+            #     self.metadata['image_paths'] = [os.path.abspath(os.path.normpath(p)) for p in self.metadata['image_paths']]
             return True
         except Exception as e:
             logging.error(f"加载索引/元数据时出错: {e}")

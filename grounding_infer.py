@@ -141,7 +141,8 @@ class GroundingDINOProcessor:
             logging.debug("从 PIL.Image 加载图像成功。")
         elif isinstance(image_input, np.ndarray):
             if image_input.ndim == 3 and image_input.shape[2] == 3:
-                original_cv_image = image_input 
+                # original_cv_image = image_input 
+                original_cv_image = cv2.cvtColor(image_input, cv2.COLOR_RGB2BGR)
                 img_rgb_pil = Image.fromarray(cv2.cvtColor(image_input, cv2.COLOR_BGR2RGB))
                 _, tensor_img = dino_load_image(img_rgb_pil)
                 if tensor_img is None:
@@ -178,23 +179,24 @@ class GroundingDINOProcessor:
 
 if __name__ == '__main__':
     from pathlib import Path
+    import time
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-    DINO_CONFIG = "/home/pjh/faiss_search/groundingdino/config/GroundingDINO_SwinT_OGC.py"
-    DINO_WEIGHTS = "/home/pjh/faiss_search/groundingdino/groundingdino_swint_ogc.pth"
-    data_file = "/home/pjh/faiss_search/DataFiles_Decrypt_20250520170635/DataFiles_Decrypt"
+    DINO_CONFIG = "/home/fuxin/faiss_search/groundingdino/config/GroundingDINO_SwinT_OGC.py"
+    DINO_WEIGHTS = "/home/fuxin/faiss_search/groundingdino/groundingdino_swint_ogc.pth"
+    data_file = "/home/fuxin/faiss_search/DataFiles_Decrypt_20250520170635/DataFiles_Decrypt"
     directory = Path(data_file)
     files = [str(file) for file in directory.iterdir() if file.suffix.lower() == '.jpeg']
     TEST_PROMPT = "whole street view"
 
 
     processor = GroundingDINOProcessor(config_path=DINO_CONFIG, model_path=DINO_WEIGHTS, device='cuda')
-    
-    for  TEST_IMAGE_PATH in files:
+    start_time= time.time()
+    for TEST_IMAGE_PATH in files:
         rois = processor.get_rois_from_image(TEST_IMAGE_PATH, TEST_PROMPT)
         
         if rois:
             logging.info(f"成功从 '{TEST_IMAGE_PATH}' 提取到 {len(rois)} 个ROI。")
-            output_test_dir = "/home/pjh/faiss_search/Output"
+            output_test_dir = "/home/fuxin/faiss_search/Output"
             os.makedirs(output_test_dir, exist_ok=True)
             for i, roi_img in enumerate(rois):
                 file_path = Path(TEST_IMAGE_PATH)
@@ -202,3 +204,4 @@ if __name__ == '__main__':
             logging.info(f"测试ROI已保存到 '{output_test_dir}' 目录。")
         else:
             logging.info(f"未能从 '{TEST_IMAGE_PATH}' 提取到ROI。")
+    print(f"耗时{time.time()-start_time}")
