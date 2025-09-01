@@ -24,9 +24,9 @@ class GroundingDINOProcessor:
 
         
         self.ASPECT_RATIO_MIN = 1.0
-        self.ASPECT_RATIO_MAX = 4/3
+        self.ASPECT_RATIO_MAX = 2.0
         self.AREA_RATIO_MIN = 0.08
-        self.AREA_RATIO_MAX = 0.20
+        self.AREA_RATIO_MAX = 0.35
         
         self.DEFAULT_BOX_THRESHOLD = 0.35
         self.DEFAULT_TEXT_THRESHOLD = 0.25
